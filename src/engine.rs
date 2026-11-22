@@ -848,6 +848,47 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn test_block_cache_is_per_engine() {
+        // Two engines write different entries at the same file positions. One
+        // thread reads both, so a cache keyed only by position returns the wrong
+        // block for the second engine.
+        let dirs: Vec<_> = (0..2)
+            .map(|_| {
+                tempfile::Builder::new()
+                    .prefix("test_block_cache_is_per_engine")
+                    .tempdir()
+                    .unwrap()
+            })
+            .collect();
+        let open = |dir: &tempfile::TempDir| {
+            let cfg = Config {
+                dir: dir.path().to_str().unwrap().to_owned(),
+                ..Default::default()
+            };
+            RaftLogEngine::open(cfg).unwrap()
+        };
+        let engines: Vec<_> = dirs.iter().map(open).collect();
+        for (engine, byte) in engines.iter().zip([b'a', b'b']) {
+            engine.append(1, 1, 3, Some(&[byte; 16]));
+        }
+        for _ in 0..2 {
+            for (engine, byte) in engines.iter().zip([b'a', b'b']) {
+                for index in 1..3 {
+                    let entry = engine.get_entry::<Entry>(1, index).unwrap().unwrap();
+                    assert_eq!(entry.data.as_ref(), &[byte; 16]);
+                }
+            }
+        }
+
+        // A reopened engine reads the same file positions with a new identity.
+        drop(engines);
+        let first = open(&dirs[0]);
+        first.append(1, 3, 4, Some(&[b'c'; 16]));
+        let entry = first.get_entry::<Entry>(1, 1).unwrap().unwrap();
+        assert_eq!(entry.data.as_ref(), &[b'a'; 16]);
+    }
+
+    #[test]
     fn test_get_entry() {
         let normal_batch_size = 10;
         let compressed_batch_size = 5120;
