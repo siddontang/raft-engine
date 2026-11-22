@@ -19,7 +19,7 @@ use crate::file_pipe_log::{DefaultMachineFactory, FilePipeLog, FilePipeLogBuilde
 use crate::log_batch::{Command, LogBatch, MessageExt};
 use crate::memtable::{EntryIndex, MemTableRecoverContextFactory, MemTables};
 use crate::metrics::*;
-use crate::pipe_log::{FileBlockHandle, FileId, LogQueue, PipeLog};
+use crate::pipe_log::{FileBlockHandle, LogQueue, PipeLog};
 use crate::purge::{PurgeHook, PurgeManager};
 use crate::value_codec::{ProtobufCodec, ValueCodec};
 use crate::write_barrier::{WriteBarrier, Writer};
@@ -643,23 +643,21 @@ where
 }
 
 struct BlockCache {
-    key: Cell<FileBlockHandle>,
+    // Each key holds the identity of the open log and the block position. Engines in one process
+    // can reuse a file ID and offset, so the position alone does not identify a block.
+    key: Cell<Option<(u64, FileBlockHandle)>>,
     block: RefCell<Vec<u8>>,
 }
 
 impl BlockCache {
     fn new() -> Self {
         BlockCache {
-            key: Cell::new(FileBlockHandle {
-                id: FileId::new(LogQueue::Append, 0),
-                offset: 0,
-                len: 0,
-            }),
+            key: Cell::new(None),
             block: RefCell::new(Vec::new()),
         }
     }
 
-    fn insert(&self, key: FileBlockHandle, block: Vec<u8>) {
+    fn insert(&self, key: Option<(u64, FileBlockHandle)>, block: Vec<u8>) {
         self.key.set(key);
         self.block.replace(block);
     }
@@ -676,9 +674,10 @@ where
     P: PipeLog,
 {
     BLOCK_CACHE.with(|cache| {
-        if cache.key.get() != idx.entries.unwrap() {
+        let key = pipe_log.cache_id().map(|id| (id, idx.entries.unwrap()));
+        if key.is_none() || cache.key.get() != key {
             cache.insert(
-                idx.entries.unwrap(),
+                key,
                 LogBatch::decode_entries_block(
                     &pipe_log.read_bytes(idx.entries.unwrap())?,
                     idx.entries.unwrap(),
@@ -710,9 +709,10 @@ where
     P: PipeLog,
 {
     BLOCK_CACHE.with(|cache| {
-        if cache.key.get() != idx.entries.unwrap() {
+        let key = pipe_log.cache_id().map(|id| (id, idx.entries.unwrap()));
+        if key.is_none() || cache.key.get() != key {
             cache.insert(
-                idx.entries.unwrap(),
+                key,
                 LogBatch::decode_entries_block(
                     &pipe_log.read_bytes(idx.entries.unwrap())?,
                     idx.entries.unwrap(),
@@ -732,7 +732,7 @@ pub(crate) mod tests {
     use crate::env::{ObfuscatedFileSystem, Permission};
     use crate::file_pipe_log::{FileNameExt, parse_reserved_file_name};
     use crate::log_batch::AtomicGroupBuilder;
-    use crate::pipe_log::Version;
+    use crate::pipe_log::{FileId, Version};
     use crate::test_util::{PanicGuard, generate_entries};
     use crate::util::ReadableSize;
     use kvproto::raft_serverpb::RaftLocalState;
